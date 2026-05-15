@@ -33,7 +33,9 @@ interface WidgetShellProps {
 }
 
 export function WidgetShell({ title, icon, iconColor, children, widgetType }: WidgetShellProps) {
-  const [opacity, setOpacityState] = useState(1)
+  // 슬라이더 기본 표시값 — main 의 기본 위젯 opacity(0.95)와 일치. 사용자가
+  // 슬라이더 열면 현재 적용된 값과 일치되게 보이도록.
+  const [opacity, setOpacityState] = useState(0.95)
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
   const [opacityOpen, setOpacityOpen] = useState(false)
   const [fontOpen, setFontOpen] = useState(false)

@@ -892,9 +892,9 @@ function createWidgetWindow(widgetType: WidgetType, instanceId?: string, options
     && typeof saved?.y === 'number'
   const clamped = hasSavedPos ? clampToScreen(saved!.x!, saved!.y!, width, height) : null
   const { x, y } = clamped ?? getSpreadPosition(widgetType, width, height)
-  // 기본 불투명도 1.0 — 0.97 은 흰색 글씨가 "약간 어두운 흰색" 으로 보이는 원인이었음.
-  // 사용자가 투명도 슬라이더로 직접 낮출 수 있음.
-  const opacity = saved?.opacity ?? 1.0
+  // 기본 불투명도 0.95 — 살짝 투명하게 해서 바탕화면 위에 자연스럽게 떠 있는 느낌.
+  // 사용자가 투명도 슬라이더로 직접 더 조정 가능.
+  const opacity = saved?.opacity ?? 0.95
   // 위젯은 '일할 때 방해 안 되도록' 무조건 맨 뒤에서 시작.
   // 사용자가 세션 중 Pin 버튼으로 임시로 위로 올릴 수 있지만, 다음 실행 땐 다시 맨 뒤.
   const alwaysOnTop = false
