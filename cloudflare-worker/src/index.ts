@@ -114,6 +114,278 @@ async function fetchSchoolInfo(name: string, env: Env): Promise<unknown[]> {
   }))
 }
 
+// ─── 기상청 단기예보 (data.go.kr 1360000) ────────────────────
+const KMA_BASE = 'https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0'
+
+/** WGS84 → 기상청 LCC 격자 좌표 (Lambert Conformal Conic). iwmemo 검증된 변환. */
+function gpsToGrid(lat: number, lon: number): { nx: number; ny: number } {
+  const RE = 6371.00877, GRID = 5.0
+  const SLAT1 = 30.0, SLAT2 = 60.0
+  const OLON = 126.0, OLAT = 38.0
+  const XO = 43, YO = 136
+  const DEGRAD = Math.PI / 180.0
+  const re = RE / GRID
+  const slat1 = SLAT1 * DEGRAD
+  const slat2 = SLAT2 * DEGRAD
+  const olon = OLON * DEGRAD
+  const olat = OLAT * DEGRAD
+  let sn = Math.tan(Math.PI * 0.25 + slat2 * 0.5) / Math.tan(Math.PI * 0.25 + slat1 * 0.5)
+  sn = Math.log(Math.cos(slat1) / Math.cos(slat2)) / Math.log(sn)
+  let sf = Math.tan(Math.PI * 0.25 + slat1 * 0.5)
+  sf = (Math.pow(sf, sn) * Math.cos(slat1)) / sn
+  let ro = Math.tan(Math.PI * 0.25 + olat * 0.5)
+  ro = (re * sf) / Math.pow(ro, sn)
+  let ra = Math.tan(Math.PI * 0.25 + lat * DEGRAD * 0.5)
+  ra = (re * sf) / Math.pow(ra, sn)
+  let theta = lon * DEGRAD - olon
+  if (theta > Math.PI) theta -= 2.0 * Math.PI
+  if (theta < -Math.PI) theta += 2.0 * Math.PI
+  theta *= sn
+  return {
+    nx: Math.floor(ra * Math.sin(theta) + XO + 0.5),
+    ny: Math.floor(ro - ra * Math.cos(theta) + YO + 0.5),
+  }
+}
+
+/** 초단기실황 base_time — 매시간 30분 이후 발표. 안전하게 -40분 적용. */
+function getNcstBaseTime(now: Date): { base_date: string; base_time: string } {
+  const d = new Date(now)
+  let hour = d.getHours()
+  if (d.getMinutes() < 40) {
+    hour -= 1
+    if (hour < 0) { hour = 23; d.setDate(d.getDate() - 1) }
+  }
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return { base_date: `${y}${m}${day}`, base_time: `${String(hour).padStart(2, '0')}00` }
+}
+
+/** 단기예보 base_time — 02, 05, 08, 11, 14, 17, 20, 23시 발표. 발표 +10분 후부터 사용. */
+function getFcstBaseTime(now: Date): { base_date: string; base_time: string } {
+  const baseHours = [2, 5, 8, 11, 14, 17, 20, 23]
+  const d = new Date(now)
+  let baseHour = -1
+  for (const h of baseHours) {
+    const releaseTime = new Date(d)
+    releaseTime.setHours(h, 10, 0, 0)
+    if (d >= releaseTime) baseHour = h
+  }
+  if (baseHour < 0) {
+    // 전날 23시 발표 사용
+    d.setDate(d.getDate() - 1)
+    baseHour = 23
+  }
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return { base_date: `${y}${m}${day}`, base_time: `${String(baseHour).padStart(2, '0')}00` }
+}
+
+/** 강수형태(PTY) + 하늘상태(SKY) → WMO weather_code 매핑 — Open-Meteo 호환. */
+function ptySkyToWmoCode(pty: number, sky: number): number {
+  if (pty === 1) return 63  // 비
+  if (pty === 2) return 67  // 비/눈
+  if (pty === 3) return 73  // 눈
+  if (pty === 4) return 82  // 소나기
+  if (pty === 5) return 51  // 빗방울
+  if (pty === 6) return 56  // 빗방울/눈
+  if (pty === 7) return 71  // 눈날림
+  if (sky === 1) return 0   // 맑음
+  if (sky === 3) return 2   // 구름많음
+  if (sky === 4) return 3   // 흐림
+  return 0
+}
+
+/** KMA 강수형태(PTY) → 한국식 한글 라벨. iwmemo 패턴 그대로. */
+function ptyToLabel(pty: number): string {
+  switch (pty) {
+    case 1: return '비'
+    case 2: return '비/눈'
+    case 3: return '눈'
+    case 4: return '소나기'
+    case 5: return '빗방울'
+    case 6: return '빗방울/눈날림'
+    case 7: return '눈날림'
+    default: return ''
+  }
+}
+
+/** 한국 기상청 특보 임계값 기반 알림. iwmemo 검증 임계 그대로. */
+function buildAlerts(temp: number | null, windSpeed: number | null, rain: number | null): string[] {
+  const alerts: string[] = []
+  if (temp !== null) {
+    if (temp <= -12) alerts.push('🥶한파')
+    if (temp >= 35) alerts.push('🔥폭염')
+    else if (temp >= 33) alerts.push('☀️더위')
+  }
+  if (windSpeed !== null && windSpeed >= 14) alerts.push('💨강풍')
+  if (rain !== null && rain >= 30) alerts.push('🌊폭우')
+  return alerts
+}
+
+interface KmaItem { category?: string; obsrValue?: string; fcstValue?: string; fcstDate?: string; fcstTime?: string }
+
+async function fetchKmaUltraSrtNcst(nx: number, ny: number, env: Env): Promise<Map<string, string> | null> {
+  if (!env.AIR_KOREA_KEY) return null
+  const { base_date, base_time } = getNcstBaseTime(new Date())
+  const url = `${KMA_BASE}/getUltraSrtNcst?serviceKey=${encodeURIComponent(env.AIR_KOREA_KEY)}&numOfRows=10&pageNo=1&dataType=JSON&base_date=${base_date}&base_time=${base_time}&nx=${nx}&ny=${ny}`
+  try {
+    const r = await fetch(url, { cf: { cacheTtl: 60, cacheEverything: true } })
+    if (!r.ok) return null
+    const text = await r.text()
+    if (text.startsWith('<')) return null  // KMA 가 에러시 XML 반환
+    const data = JSON.parse(text)
+    const items = data?.response?.body?.items?.item as KmaItem[] | undefined
+    if (!Array.isArray(items)) return null
+    const map = new Map<string, string>()
+    for (const it of items) {
+      if (it.category && it.obsrValue !== undefined) map.set(it.category, it.obsrValue)
+    }
+    return map
+  } catch { return null }
+}
+
+async function fetchKmaVilageFcst(nx: number, ny: number, env: Env): Promise<KmaItem[] | null> {
+  if (!env.AIR_KOREA_KEY) return null
+  const { base_date, base_time } = getFcstBaseTime(new Date())
+  // 단기예보는 3일치 = 약 290개 행. 오늘분만 필터.
+  const url = `${KMA_BASE}/getVilageFcst?serviceKey=${encodeURIComponent(env.AIR_KOREA_KEY)}&numOfRows=300&pageNo=1&dataType=JSON&base_date=${base_date}&base_time=${base_time}&nx=${nx}&ny=${ny}`
+  try {
+    const r = await fetch(url, { cf: { cacheTtl: 60, cacheEverything: true } })
+    if (!r.ok) return null
+    const text = await r.text()
+    if (text.startsWith('<')) return null
+    const data = JSON.parse(text)
+    const items = data?.response?.body?.items?.item as KmaItem[] | undefined
+    return Array.isArray(items) ? items : null
+  } catch { return null }
+}
+
+interface WeatherResult {
+  current: {
+    temperature: number | null
+    weatherCode: number
+    humidity: number | null      // REH — 단위 %
+    windSpeed: number | null     // WSD — 단위 m/s
+    precipType: string           // PTY 한글 라벨 ('비', '눈', '빗방울', ...) — 없으면 ''
+    precipNow: number | null     // RN1 — 최근 1시간 강수량(mm)
+  }
+  daily: { tempMin: number | null; tempMax: number | null; weatherCode: number; precip: number }
+  hourly: {
+    morning: { temp: number | null; code: number }
+    afternoon: { temp: number | null; code: number }
+  }
+  alerts: string[]               // 🥶한파 / 🔥폭염 / 💨강풍 / 🌊폭우
+  baseTime: string | null        // KMA 발표 시각 (YYYYMMDDHHmm) — 데이터 신선도 표시용
+  source: 'kma' | 'fallback'
+}
+
+async function fetchWeatherFromKma(lat: number, lon: number, env: Env): Promise<WeatherResult | null> {
+  if (!env.AIR_KOREA_KEY) return null
+  const { nx, ny } = gpsToGrid(lat, lon)
+  const [ncst, fcst] = await Promise.all([
+    fetchKmaUltraSrtNcst(nx, ny, env),
+    fetchKmaVilageFcst(nx, ny, env),
+  ])
+  if (!ncst && !fcst) return null
+
+  const toNum = (v: string | undefined): number | null => {
+    if (v === undefined || v === null || v === '' || v === '-') return null
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  const ymdToday = (() => {
+    const d = new Date()
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+  })()
+
+  // 단기예보에서 오늘분만 필터, category 별 그룹화
+  const todayFcst = (fcst ?? []).filter((x) => x.fcstDate === ymdToday)
+  const byCatTime = new Map<string, Map<string, string>>()
+  for (const it of todayFcst) {
+    if (!it.category || !it.fcstTime || it.fcstValue === undefined) continue
+    if (!byCatTime.has(it.category)) byCatTime.set(it.category, new Map())
+    byCatTime.get(it.category)!.set(it.fcstTime, it.fcstValue)
+  }
+  const getFcstAt = (cat: string, time: string): string | undefined =>
+    byCatTime.get(cat)?.get(time)
+  const getAnyFcst = (cat: string): string | undefined => {
+    const m = byCatTime.get(cat)
+    if (!m) return undefined
+    return m.values().next().value
+  }
+
+  // 현재 기온/날씨: 초단기실황 + 현재 시각의 SKY (단기예보)
+  const curHourPad = String(new Date().getHours()).padStart(2, '0') + '00'
+  const curTemp = toNum(ncst?.get('T1H')) ?? toNum(getFcstAt('TMP', curHourPad))
+  const curPty = toNum(ncst?.get('PTY')) ?? toNum(getFcstAt('PTY', curHourPad)) ?? 0
+  const curSky = toNum(getFcstAt('SKY', curHourPad)) ?? 1
+  // 초단기실황 추가 카테고리 — 습도·풍속·1시간 강수.
+  const curHumidity = toNum(ncst?.get('REH'))
+  const curWind = toNum(ncst?.get('WSD'))
+  const curRain1h = toNum(ncst?.get('RN1'))
+
+  const tmn = toNum(getAnyFcst('TMN'))
+  const tmx = toNum(getAnyFcst('TMX'))
+  // 오늘 일강수량 합산 (단기예보 PCP — '강수없음' or '1mm 미만' 같은 문자열 가능)
+  let precip = 0
+  for (const v of byCatTime.get('PCP')?.values() ?? []) {
+    const m = v.match(/[\d.]+/)
+    if (m) precip += parseFloat(m[0]) || 0
+  }
+  // 일중 PTY/SKY 최빈값
+  let dayWcode = 0
+  for (const t of byCatTime.get('PTY')?.entries() ?? []) {
+    const p = toNum(t[1])
+    if (p && p > 0) { dayWcode = ptySkyToWmoCode(p, 1); break }
+  }
+  if (dayWcode === 0) {
+    const skyVals = Array.from(byCatTime.get('SKY')?.values() ?? []).map(toNum)
+    const skyMode = skyVals.reduce((a, b) => (b ?? 1) > (a ?? 1) ? b : a, 1) ?? 1
+    dayWcode = ptySkyToWmoCode(0, skyMode)
+  }
+
+  const morningTemp = toNum(getFcstAt('TMP', '0900'))
+  const morningPty = toNum(getFcstAt('PTY', '0900')) ?? 0
+  const morningSky = toNum(getFcstAt('SKY', '0900')) ?? 1
+  const afternoonTemp = toNum(getFcstAt('TMP', '1500'))
+  const afternoonPty = toNum(getFcstAt('PTY', '1500')) ?? 0
+  const afternoonSky = toNum(getFcstAt('SKY', '1500')) ?? 1
+
+  // alerts — 한국 기상청 특보 임계값. 현재 기온/풍속 + 일강수 합산 기준.
+  const alerts = buildAlerts(curTemp, curWind, precip > 0 ? precip : curRain1h)
+
+  // KMA 발표 시각 — 초단기실황 base_time 우선, 없으면 단기예보. 신선도 표시용.
+  const ncstBT = getNcstBaseTime(new Date())
+  const fcstBT = getFcstBaseTime(new Date())
+  const baseTime = ncst ? `${ncstBT.base_date}${ncstBT.base_time}` : `${fcstBT.base_date}${fcstBT.base_time}`
+
+  return {
+    current: {
+      temperature: curTemp,
+      weatherCode: ptySkyToWmoCode(curPty, curSky),
+      humidity: curHumidity,
+      windSpeed: curWind,
+      precipType: ptyToLabel(curPty),
+      precipNow: curRain1h,
+    },
+    daily: {
+      tempMin: tmn,
+      tempMax: tmx,
+      weatherCode: dayWcode,
+      precip: Math.round(precip * 10) / 10,
+    },
+    hourly: {
+      morning: { temp: morningTemp, code: ptySkyToWmoCode(morningPty, morningSky) },
+      afternoon: { temp: afternoonTemp, code: ptySkyToWmoCode(afternoonPty, afternoonSky) },
+    },
+    alerts,
+    baseTime,
+    source: 'kma',
+  }
+}
+
 // ─── 에어코리아(한국환경공단) 호출 ────────────────────
 const AIRKOREA_BASE = 'http://apis.data.go.kr/B552584/ArpltnInforInqireSvc'
 
@@ -373,6 +645,31 @@ export default {
         return json(result)
       }
 
+      // 기상청 날씨 ─ /weather?lat=37.5665&lon=126.978
+      // 한국 영토 좌표 → KMA 초단기실황 + 단기예보. 60분 TTL 캐시(기상청 갱신 주기).
+      // AIR_KOREA_KEY secret 미설정 시 404 → 클라이언트가 Open-Meteo fallback.
+      if (url.pathname === '/weather') {
+        const lat = parseFloat(url.searchParams.get('lat') ?? '')
+        const lon = parseFloat(url.searchParams.get('lon') ?? '')
+        // 한국 영토 + 인접 해상 (제주 남단~함경북도, 가거도~독도).
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)
+          || lat < 32 || lat > 39.5 || lon < 124 || lon > 132) {
+          return json({ error: 'invalid coordinates' }, 400)
+        }
+        // 격자 변환은 동일 nx/ny 매핑 → 같은 격자 사용자끼리 캐시 공유.
+        const { nx, ny } = gpsToGrid(lat, lon)
+        const cacheKey = `weather:v1:${nx}_${ny}`
+        const cached = await env.CACHE.get(cacheKey, 'json')
+        if (cached) return json(cached)
+        const result = await fetchWeatherFromKma(lat, lon, env)
+        if (result) {
+          // 60분 — KMA 초단기실황·단기예보 갱신 주기.
+          await env.CACHE.put(cacheKey, JSON.stringify(result), { expirationTtl: 60 * 60 })
+          return json(result)
+        }
+        return json({ error: 'kma unavailable', source: 'fallback' }, 404)
+      }
+
       // 미세먼지 ─ /airquality?city=김제
       // 좌표 대신 도시명을 받음(클라이언트가 76개 도시 목록 중 선택한 결과). 10분 TTL 캐시.
       if (url.pathname === '/airquality') {
@@ -397,7 +694,7 @@ export default {
 
       // 헬스체크
       if (url.pathname === '/' || url.pathname === '/health') {
-        return json({ ok: true, service: 'schooldesk-meal', endpoints: ['/school', '/meal', '/airquality'] })
+        return json({ ok: true, service: 'schooldesk-meal', endpoints: ['/school', '/meal', '/weather', '/airquality'] })
       }
 
       return json({ error: 'not found' }, 404)

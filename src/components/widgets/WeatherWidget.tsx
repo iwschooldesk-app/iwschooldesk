@@ -131,9 +131,18 @@ function matchCityFromAddress(address: string | undefined): City | null {
 }
 
 interface WeatherData {
-  current: { temperature: number; humidity: number; weatherCode: number }
+  current: {
+    temperature: number
+    humidity: number
+    weatherCode: number
+    windSpeed: number | null      // KMA WSD (m/s) — Open-Meteo 미제공 시 null
+    precipType: string            // '비' / '눈' / '소나기' 등 — 없으면 ''
+    precipNow: number | null      // 최근 1시간 강수량(mm) — KMA only
+  }
   daily: { tempMin: number; tempMax: number; weatherCode: number; precip: number }
   hourly: { morning: { temp: number; code: number }; afternoon: { temp: number; code: number } }
+  alerts: string[]                // KMA 특보 기반 — 🥶한파/🔥폭염/💨강풍/🌊폭우
+  source: 'kma' | 'open-meteo'    // 데이터 출처 표시용 (사용자에게 정확도 신호)
   fetchedAt: number
 }
 
@@ -169,6 +178,29 @@ function pm10Grade(v: number | null): { label: string; color: string } {
   if (v <= 80) return { label: '보통', color: '#F59E0B' }
   if (v <= 150) return { label: '나쁨', color: '#EF4444' }
   return { label: '매우나쁨', color: '#7C3AED' }
+}
+
+/** 한국 기상청 특보 임계값 → 이모지 chip. Open-Meteo fallback 경로에서도 동일 임계 적용. */
+function buildAlerts(temp: number | null, windSpeedMs: number | null, rainMm: number | null): string[] {
+  const a: string[] = []
+  if (temp !== null) {
+    if (temp <= -12) a.push('🥶한파')
+    if (temp >= 35) a.push('🔥폭염')
+    else if (temp >= 33) a.push('☀️더위')
+  }
+  if (windSpeedMs !== null && windSpeedMs >= 14) a.push('💨강풍')
+  if (rainMm !== null && rainMm >= 30) a.push('🌊폭우')
+  return a
+}
+
+/** WMO weather_code → 한국식 강수형태 한글 라벨 (강수 있을 때만). */
+function wmoToPrecipType(code: number): string {
+  if (code >= 80 && code <= 82) return '소나기'
+  if (code >= 95 && code <= 99) return '천둥번개'
+  if ((code >= 71 && code <= 77) || code === 85 || code === 86) return '눈'
+  if (code >= 61 && code <= 67) return '비'
+  if (code >= 51 && code <= 57) return '이슬비'
+  return ''
 }
 
 export function WeatherWidget() {
@@ -221,19 +253,21 @@ export function WeatherWidget() {
     setLoading(true)
     setError(null)
 
-    // best_match 기본 모델 — KMA 전용 모델(kma_seamless/kma_ldps)은 current 시간 데이터를
-    // 제공하지 않아 기온/날씨 코드가 모두 null 로 반환되는 문제 확인 → 기본값으로 복귀.
+    // Worker (KMA + 에어코리아 프록시 + 캐시) URL — NEIS Worker 와 동일 도메인.
+    // Worker 의 AIR_KOREA_KEY secret 미설정이면 worker 가 404 → Open-Meteo fallback 자동.
+    const WORKER_URL = 'https://schooldesk-meal.simssijjang.workers.dev'
+    const workerWeatherUrl = `${WORKER_URL}/weather?lat=${target.lat}&lon=${target.lon}`
+    const workerAirUrl = `${WORKER_URL}/airquality?city=${encodeURIComponent(target.name)}`
+
+    // Open-Meteo fallback — best_match 기본 모델 (KMA 전용 모델은 current 데이터 null 반환 확인됨).
+    // wind_speed_unit=ms 로 한국 기상청 풍속 단위(m/s) 통일 → buildAlerts 임계값(14m/s) 일치.
     const wUrl = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}`
-      + `&current=temperature_2m,relative_humidity_2m,weather_code`
+      + `&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m`
       + `&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_sum`
       + `&hourly=temperature_2m,weather_code`
-      + `&timezone=Asia%2FSeoul&forecast_days=1`
+      + `&wind_speed_unit=ms&timezone=Asia%2FSeoul&forecast_days=1`
     const aUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${target.lat}&longitude=${target.lon}`
       + `&current=pm10,pm2_5&timezone=Asia%2FSeoul`
-    // Worker (에어코리아 프록시 + 캐시) URL — NEIS Worker 와 동일 도메인.
-    // 사용자가 Worker 의 AIR_KOREA_KEY secret 미설정이면 worker 가 404 → Open-Meteo fallback 자동.
-    const WORKER_URL = 'https://schooldesk-meal.simssijjang.workers.dev'
-    const workerAirUrl = `${WORKER_URL}/airquality?city=${encodeURIComponent(target.name)}`
 
     /** fetch + 비-2xx 도 throw 처리해 재시도 대상으로 만든다. */
     const tryFetch = async (url: string): Promise<Response> => {
@@ -274,36 +308,102 @@ export function WeatherWidget() {
     }
 
     try {
-      const wRes = await retryFetch(wUrl, '날씨')
-      const w = await wRes.json() as {
-        current: { temperature_2m: number; relative_humidity_2m: number; weather_code: number }
-        daily: { temperature_2m_max: number[]; temperature_2m_min: number[]; weather_code: number[]; precipitation_sum: number[] }
-        hourly: { time: string[]; temperature_2m: number[]; weather_code: number[] }
-      }
-      // 오전 9시 / 오후 3시 시점 hourly 추출 (없으면 가장 가까운 시각).
-      const findHour = (h: number): number => {
-        const idx = w.hourly.time.findIndex((t) => new Date(t).getHours() === h)
-        return idx >= 0 ? idx : 0
-      }
-      const mIdx = findHour(9)
-      const aIdx = findHour(15)
-      const next: WeatherData = {
-        current: {
-          temperature: Math.round(w.current.temperature_2m),
-          humidity: Math.round(w.current.relative_humidity_2m),
-          weatherCode: w.current.weather_code,
-        },
-        daily: {
-          tempMin: Math.round(w.daily.temperature_2m_min[0]),
-          tempMax: Math.round(w.daily.temperature_2m_max[0]),
-          weatherCode: w.daily.weather_code[0],
-          precip: Math.round((w.daily.precipitation_sum[0] ?? 0) * 10) / 10,
-        },
-        hourly: {
-          morning: { temp: Math.round(w.hourly.temperature_2m[mIdx]), code: w.hourly.weather_code[mIdx] },
-          afternoon: { temp: Math.round(w.hourly.temperature_2m[aIdx]), code: w.hourly.weather_code[aIdx] },
-        },
-        fetchedAt: Date.now(),
+      // ─── 1순위: Worker /weather (한국 기상청 KMA 초단기실황 + 단기예보) ───
+      // Worker 가 404(키 미설정) 또는 네트워크 실패 시 Open-Meteo fallback. 재시도 X (빠른 fallback).
+      let kmaResult: WeatherData | null = null
+      try {
+        const kr = await fetch(workerWeatherUrl, { signal: ctrl.signal })
+        if (kr.ok) {
+          const k = await kr.json() as {
+            current: {
+              temperature: number | null; weatherCode: number; humidity: number | null
+              windSpeed: number | null; precipType: string; precipNow: number | null
+            }
+            daily: { tempMin: number | null; tempMax: number | null; weatherCode: number; precip: number }
+            hourly: { morning: { temp: number | null; code: number }; afternoon: { temp: number | null; code: number } }
+            alerts: string[]
+            source: 'kma'
+          }
+          // KMA 가 일부 필드 null 이면 (예: 발표 시각 직전) Open-Meteo 로 보강하는 게 안전 →
+          // 핵심 (current.temperature) 만 있으면 KMA 우선 채택, 없으면 fallback.
+          if (k.current.temperature !== null) {
+            kmaResult = {
+              current: {
+                temperature: Math.round(k.current.temperature),
+                humidity: k.current.humidity ?? 0,
+                weatherCode: k.current.weatherCode,
+                windSpeed: k.current.windSpeed,
+                precipType: k.current.precipType,
+                precipNow: k.current.precipNow,
+              },
+              daily: {
+                tempMin: Math.round(k.daily.tempMin ?? k.current.temperature),
+                tempMax: Math.round(k.daily.tempMax ?? k.current.temperature),
+                weatherCode: k.daily.weatherCode,
+                precip: k.daily.precip,
+              },
+              hourly: {
+                morning: {
+                  temp: Math.round(k.hourly.morning.temp ?? k.current.temperature),
+                  code: k.hourly.morning.code,
+                },
+                afternoon: {
+                  temp: Math.round(k.hourly.afternoon.temp ?? k.current.temperature),
+                  code: k.hourly.afternoon.code,
+                },
+              },
+              alerts: k.alerts ?? [],
+              source: 'kma',
+              fetchedAt: Date.now(),
+            }
+          }
+        }
+      } catch { /* worker 다운/네트워크 — fallback */ }
+
+      let next: WeatherData
+      if (kmaResult) {
+        next = kmaResult
+      } else {
+        // ─── Fallback: Open-Meteo (모델 보간, 한국 ±1~2℃ 오차 가능) ───
+        const wRes = await retryFetch(wUrl, '날씨')
+        const w = await wRes.json() as {
+          current: { temperature_2m: number; relative_humidity_2m: number; weather_code: number; wind_speed_10m?: number }
+          daily: { temperature_2m_max: number[]; temperature_2m_min: number[]; weather_code: number[]; precipitation_sum: number[] }
+          hourly: { time: string[]; temperature_2m: number[]; weather_code: number[] }
+        }
+        // 오전 9시 / 오후 3시 시점 hourly 추출 (없으면 가장 가까운 시각).
+        const findHour = (h: number): number => {
+          const idx = w.hourly.time.findIndex((t) => new Date(t).getHours() === h)
+          return idx >= 0 ? idx : 0
+        }
+        const mIdx = findHour(9)
+        const aIdx = findHour(15)
+        const curTemp = Math.round(w.current.temperature_2m)
+        const curWind = typeof w.current.wind_speed_10m === 'number' ? w.current.wind_speed_10m : null
+        const dailyPrecip = Math.round((w.daily.precipitation_sum[0] ?? 0) * 10) / 10
+        next = {
+          current: {
+            temperature: curTemp,
+            humidity: Math.round(w.current.relative_humidity_2m),
+            weatherCode: w.current.weather_code,
+            windSpeed: curWind,
+            precipType: wmoToPrecipType(w.current.weather_code),
+            precipNow: null,  // Open-Meteo 무
+          },
+          daily: {
+            tempMin: Math.round(w.daily.temperature_2m_min[0]),
+            tempMax: Math.round(w.daily.temperature_2m_max[0]),
+            weatherCode: w.daily.weather_code[0],
+            precip: dailyPrecip,
+          },
+          hourly: {
+            morning: { temp: Math.round(w.hourly.temperature_2m[mIdx]), code: w.hourly.weather_code[mIdx] },
+            afternoon: { temp: Math.round(w.hourly.temperature_2m[aIdx]), code: w.hourly.weather_code[aIdx] },
+          },
+          alerts: buildAlerts(curTemp, curWind, dailyPrecip),
+          source: 'open-meteo',
+          fetchedAt: Date.now(),
+        }
       }
       setWeather(next)
       setError(null)
@@ -388,7 +488,7 @@ export function WeatherWidget() {
         background: 'radial-gradient(ellipse at 30% 0%, rgba(56,189,248,0.10) 0%, transparent 55%), radial-gradient(ellipse at 100% 100%, rgba(99,102,241,0.07) 0%, transparent 50%)',
       }}
     >
-      {/* Header — 위치 + 새로고침 */}
+      {/* Header — 위치 + 데이터 출처(KMA/Open-Meteo) + 새로고침 */}
       {!iAmWallpaper && (
         <div className="flex items-center gap-2 shrink-0 mb-2">
           <button
@@ -400,6 +500,20 @@ export function WeatherWidget() {
             <MapPin size={12} strokeWidth={2.4} />
             <span style={{ fontSize: 12.5, fontWeight: 800, letterSpacing: '-0.02em' }}>{city.name}</span>
           </button>
+          {weather && (
+            <span
+              title={weather.source === 'kma' ? '한국 기상청 초단기실황' : 'Open-Meteo 모델 보간(±1~2℃ 오차 가능)'}
+              style={{
+                fontSize: 9, fontWeight: 900, letterSpacing: '0.02em',
+                padding: '2px 5px', borderRadius: 4,
+                background: weather.source === 'kma' ? 'rgba(34,197,94,0.15)' : 'rgba(148,163,184,0.15)',
+                color: weather.source === 'kma' ? '#15803D' : '#475569',
+                border: weather.source === 'kma' ? '1px solid rgba(34,197,94,0.3)' : '1px solid rgba(148,163,184,0.3)',
+              }}
+            >
+              {weather.source === 'kma' ? '기상청' : 'O·M'}
+            </span>
+          )}
           <div className="flex-1" />
           <button
             onClick={() => fetchAll(city)}
@@ -452,12 +566,17 @@ export function WeatherWidget() {
                 color: 'var(--text-secondary)', marginTop: 3,
               }}
             >
-              {cur.label}
-              {weather.daily.precip > 0 && (
+              {/* KMA 가 강수형태 한글 라벨(빗방울/눈날림 등 세분) 주면 우선 사용. */}
+              {weather.current.precipType || cur.label}
+              {(weather.current.precipNow !== null && weather.current.precipNow > 0) ? (
+                <span style={{ marginLeft: 6, color: '#3B82F6' }}>
+                  · 1시간 {weather.current.precipNow}mm
+                </span>
+              ) : weather.daily.precip > 0 ? (
                 <span style={{ marginLeft: 6, color: '#3B82F6' }}>
                   · 강수 {weather.daily.precip}mm
                 </span>
-              )}
+              ) : null}
             </div>
           </div>
         </div>
@@ -486,6 +605,44 @@ export function WeatherWidget() {
           >
             최고 {weather.daily.tempMax}°
           </span>
+        </div>
+      )}
+
+      {/* 특보 chip — 한국 기상청 임계값 기반 (🥶한파·🔥폭염·💨강풍·🌊폭우). 풍속은 5m/s+ 일 때 별도 chip. */}
+      {weather && (weather.alerts.length > 0 || (weather.current.windSpeed !== null && weather.current.windSpeed >= 5)) && (
+        <div className="flex items-center justify-center gap-1.5 flex-wrap shrink-0" style={{ marginBottom: 'clamp(8px, 1.2vw, 14px)' }}>
+          {weather.alerts.map((a) => (
+            <span
+              key={a}
+              className="inline-flex items-center"
+              style={{
+                fontSize: 11, fontWeight: 900, letterSpacing: '-0.02em',
+                padding: '3px 9px', borderRadius: 999,
+                background: 'linear-gradient(135deg, rgba(239,68,68,0.16) 0%, rgba(220,38,38,0.22) 100%)',
+                color: '#991B1B',
+                border: '1px solid rgba(220,38,38,0.34)',
+                boxShadow: '0 1px 3px rgba(239,68,68,0.18)',
+              }}
+            >
+              {a}
+            </span>
+          ))}
+          {weather.current.windSpeed !== null && weather.current.windSpeed >= 5 && (
+            <span
+              className="inline-flex items-center gap-1 tabular-nums"
+              title="풍속 (m/s)"
+              style={{
+                fontSize: 11, fontWeight: 800, letterSpacing: '-0.02em',
+                padding: '3px 8px', borderRadius: 999,
+                background: 'rgba(99,102,241,0.12)',
+                color: '#4338CA',
+                border: '1px solid rgba(99,102,241,0.28)',
+              }}
+            >
+              <Wind size={10} strokeWidth={2.4} />
+              {weather.current.windSpeed.toFixed(1)} m/s
+            </span>
+          )}
         </div>
       )}
 
