@@ -221,13 +221,12 @@ export function WeatherWidget() {
     setLoading(true)
     setError(null)
 
-    // KMA 로컬 모델(kma_ldps) 명시 — 한국 기상청 로컬 예보로 정확도 ↑. 글로벌 best_match
-    // 보다 한국 좌표에서 ±2도 가까이 정확.
+    // best_match 기본 모델 — KMA 전용 모델(kma_seamless/kma_ldps)은 current 시간 데이터를
+    // 제공하지 않아 기온/날씨 코드가 모두 null 로 반환되는 문제 확인 → 기본값으로 복귀.
     const wUrl = `https://api.open-meteo.com/v1/forecast?latitude=${target.lat}&longitude=${target.lon}`
       + `&current=temperature_2m,relative_humidity_2m,weather_code`
       + `&daily=temperature_2m_max,temperature_2m_min,weather_code,precipitation_sum`
       + `&hourly=temperature_2m,weather_code`
-      + `&models=kma_seamless`
       + `&timezone=Asia%2FSeoul&forecast_days=1`
     const aUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${target.lat}&longitude=${target.lon}`
       + `&current=pm10,pm2_5&timezone=Asia%2FSeoul`
@@ -521,11 +520,11 @@ export function WeatherWidget() {
         </div>
       )}
 
-      {/* 미세먼지 — PM10 / PM2.5 */}
+      {/* 미세먼지(PM10, 왼쪽) / 초미세먼지(PM2.5, 오른쪽) — 한국 표기 관행. */}
       <div className="grid grid-cols-2 gap-2 shrink-0">
         {[
-          { label: 'PM2.5', val: air.pm25, grade: pm25 },
-          { label: 'PM10', val: air.pm10, grade: pm10v },
+          { label: '미세먼지', val: air.pm10, grade: pm10v },
+          { label: '초미세먼지', val: air.pm25, grade: pm25 },
         ].map(({ label, val, grade }) => (
           <div
             key={label}
