@@ -3,10 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- Content Security Policy: 로컬 리소스만 허용, 외부 연결 완전 차단, eval 차단 -->
+  <!-- Content Security Policy: 로컬 리소스 + Open-Meteo 날씨/미세먼지 API 만 허용.
+       NEIS 는 main 프로세스에서 호출하므로 CSP 영향 X. -->
   <meta
     http-equiv="Content-Security-Policy"
-    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none';"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data: blob:; media-src 'self'; connect-src 'self' https://api.open-meteo.com https://air-quality-api.open-meteo.com; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none';"
   />
   <title>SchoolDesk</title>
 </head>
