@@ -424,8 +424,8 @@ export function WeatherWidget() {
       {weather && morning && afternoon && (
         <div className="grid grid-cols-2 gap-2 shrink-0" style={{ marginBottom: 'clamp(8px, 1.2vw, 14px)' }}>
           {[
-            { label: '오전', m: weather.hourly.morning, info: morning },
-            { label: '오후', m: weather.hourly.afternoon, info: afternoon },
+            { label: '9시', m: weather.hourly.morning, info: morning },
+            { label: '15시', m: weather.hourly.afternoon, info: afternoon },
           ].map(({ label, m, info }) => (
             <div
               key={label}
