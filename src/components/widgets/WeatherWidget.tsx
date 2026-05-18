@@ -345,8 +345,9 @@ export function WeatherWidget() {
 
   useEffect(() => {
     fetchAll(city)
-    // 10분마다 자동 새로고침
-    const t = setInterval(() => fetchAll(city), 10 * 60 * 1000)
+    // 30분마다 자동 새로고침 — Worker 요청량/에어코리아 한도 감안.
+    // 사용자가 새로고침 버튼으로 언제든 즉시 갱신 가능.
+    const t = setInterval(() => fetchAll(city), 30 * 60 * 1000)
     return () => clearInterval(t)
   }, [city, fetchAll])
 

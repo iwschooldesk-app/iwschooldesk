@@ -58,7 +58,7 @@ function validateDate(s: string | null | undefined): string | null {
 
 // ─── Rate limit (in-memory, isolate별) ──────────────
 const RATE_WINDOW_MS = 60_000
-const RATE_MAX_PER_IP = 30  // 정상 사용은 일일 1~5회. 30회면 매우 여유.
+const RATE_MAX_PER_IP = 10  // 정상 사용은 30분에 1회. 10회/분이면 사용자 직접 새로고침 여유 + 봇 차단.
 const rateMap = new Map<string, { count: number; resetAt: number }>()
 
 function checkRateLimit(ip: string | null): boolean {
@@ -117,97 +117,99 @@ async function fetchSchoolInfo(name: string, env: Env): Promise<unknown[]> {
 // ─── 에어코리아(한국환경공단) 호출 ────────────────────
 const AIRKOREA_BASE = 'http://apis.data.go.kr/B552584/ArpltnInforInqireSvc'
 
-/** 한국 76개 도시 → 시도명 + 측정소 매칭 키워드.
- *  에어코리아 sidoName 은 줄임말('전북','경기' 등). stationKeyword 는 stationName 매칭용. */
-interface CityMap { name: string; sido: string; stationKeyword: string }
+/** 한국 76개 도시 → 시도명 + 측정소 매칭 키워드 우선순위.
+ *  에어코리아 stationName 은 동/면/읍 단위라(예: 김제시 = "요촌동/계화면/광활면") 시군구명만으론 매칭 X.
+ *  stationKeywords 는 우선순위 — 앞에서부터 시도별 응답에서 stationName.includes() 매칭. */
+interface CityMap { name: string; sido: string; stationKeywords: string[] }
 const CITY_TO_SIDO: ReadonlyArray<CityMap> = [
-  { name: '서울', sido: '서울', stationKeyword: '중구' },
-  { name: '부산', sido: '부산', stationKeyword: '광복동' },
-  { name: '인천', sido: '인천', stationKeyword: '중구' },
-  { name: '대구', sido: '대구', stationKeyword: '수창동' },
-  { name: '대전', sido: '대전', stationKeyword: '문창동' },
-  { name: '광주', sido: '광주', stationKeyword: '농성동' },
-  { name: '울산', sido: '울산', stationKeyword: '신정동' },
-  { name: '세종', sido: '세종', stationKeyword: '연기' },
-  // 경기
-  { name: '수원', sido: '경기', stationKeyword: '수원' },
-  { name: '성남', sido: '경기', stationKeyword: '성남' },
-  { name: '용인', sido: '경기', stationKeyword: '용인' },
-  { name: '고양', sido: '경기', stationKeyword: '고양' },
-  { name: '안양', sido: '경기', stationKeyword: '안양' },
-  { name: '안산', sido: '경기', stationKeyword: '안산' },
-  { name: '부천', sido: '경기', stationKeyword: '부천' },
-  { name: '의정부', sido: '경기', stationKeyword: '의정부' },
-  { name: '평택', sido: '경기', stationKeyword: '평택' },
-  { name: '시흥', sido: '경기', stationKeyword: '시흥' },
-  { name: '파주', sido: '경기', stationKeyword: '파주' },
-  { name: '김포', sido: '경기', stationKeyword: '김포' },
-  { name: '광명', sido: '경기', stationKeyword: '광명' },
-  { name: '하남', sido: '경기', stationKeyword: '하남' },
-  { name: '구리', sido: '경기', stationKeyword: '구리' },
-  { name: '남양주', sido: '경기', stationKeyword: '남양주' },
-  { name: '오산', sido: '경기', stationKeyword: '오산' },
-  { name: '이천', sido: '경기', stationKeyword: '이천' },
-  { name: '양주', sido: '경기', stationKeyword: '양주' },
-  { name: '동두천', sido: '경기', stationKeyword: '동두천' },
-  { name: '가평', sido: '경기', stationKeyword: '가평' },
-  { name: '여주', sido: '경기', stationKeyword: '여주' },
+  // 광역시 — 시청/구청 소재지 동
+  { name: '서울', sido: '서울', stationKeywords: ['중구', '종로구', '용산구'] },
+  { name: '부산', sido: '부산', stationKeywords: ['광복동', '연제구', '중구'] },
+  { name: '인천', sido: '인천', stationKeywords: ['신흥동', '구월동', '중구'] },
+  { name: '대구', sido: '대구', stationKeywords: ['수창동', '중구', '동구'] },
+  { name: '대전', sido: '대전', stationKeywords: ['문창동', '둔산동', '중구'] },
+  { name: '광주', sido: '광주', stationKeywords: ['농성동', '서석동', '광산구'] },
+  { name: '울산', sido: '울산', stationKeywords: ['신정동', '여천동', '남구'] },
+  { name: '세종', sido: '세종', stationKeywords: ['아름동', '한솔동', '전의면'] },
+  // 경기 — 도시별 도심 동 (대표 측정소 우선)
+  { name: '수원', sido: '경기', stationKeywords: ['신풍동(수원)', '인계동', '영통구', '수원'] },
+  { name: '성남', sido: '경기', stationKeywords: ['수정구', '복정동', '분당구', '성남'] },
+  { name: '용인', sido: '경기', stationKeywords: ['김량장동', '신갈동', '기흥구', '용인'] },
+  { name: '고양', sido: '경기', stationKeywords: ['주엽동', '백석동', '일산서구', '고양'] },
+  { name: '안양', sido: '경기', stationKeywords: ['만안구', '비산동', '안양'] },
+  { name: '안산', sido: '경기', stationKeywords: ['고잔동', '원곡동', '단원구', '안산'] },
+  { name: '부천', sido: '경기', stationKeywords: ['오정동', '중동', '부천'] },
+  { name: '의정부', sido: '경기', stationKeywords: ['의정부1동', '의정부'] },
+  { name: '평택', sido: '경기', stationKeywords: ['평택항', '비전동', '평택'] },
+  { name: '시흥', sido: '경기', stationKeywords: ['정왕본동', '대야동', '시흥'] },
+  { name: '파주', sido: '경기', stationKeywords: ['금촌동', '운정동', '파주'] },
+  { name: '김포', sido: '경기', stationKeywords: ['사우동', '풍무동', '김포'] },
+  { name: '광명', sido: '경기', stationKeywords: ['소하동', '철산동', '광명'] },
+  { name: '하남', sido: '경기', stationKeywords: ['신장동', '미사동', '하남'] },
+  { name: '구리', sido: '경기', stationKeywords: ['교문동', '구리'] },
+  { name: '남양주', sido: '경기', stationKeywords: ['호평동', '평내동', '남양주'] },
+  { name: '오산', sido: '경기', stationKeywords: ['오산동', '대원동', '오산'] },
+  { name: '이천', sido: '경기', stationKeywords: ['중리동', '이천'] },
+  { name: '양주', sido: '경기', stationKeywords: ['덕정동', '양주'] },
+  { name: '동두천', sido: '경기', stationKeywords: ['생연동', '동두천'] },
+  { name: '가평', sido: '경기', stationKeywords: ['가평읍', '가평'] },
+  { name: '여주', sido: '경기', stationKeywords: ['여흥동', '여주'] },
   // 강원
-  { name: '춘천', sido: '강원', stationKeyword: '춘천' },
-  { name: '원주', sido: '강원', stationKeyword: '원주' },
-  { name: '강릉', sido: '강원', stationKeyword: '강릉' },
-  { name: '동해', sido: '강원', stationKeyword: '동해' },
-  { name: '속초', sido: '강원', stationKeyword: '속초' },
-  { name: '삼척', sido: '강원', stationKeyword: '삼척' },
-  { name: '태백', sido: '강원', stationKeyword: '태백' },
+  { name: '춘천', sido: '강원', stationKeywords: ['석사동', '근화동', '춘천'] },
+  { name: '원주', sido: '강원', stationKeywords: ['명륜동', '단계동', '원주'] },
+  { name: '강릉', sido: '강원', stationKeywords: ['옥천동', '주문진', '강릉'] },
+  { name: '동해', sido: '강원', stationKeywords: ['천곡동', '동해'] },
+  { name: '속초', sido: '강원', stationKeywords: ['청호동', '속초'] },
+  { name: '삼척', sido: '강원', stationKeywords: ['교동', '삼척'] },
+  { name: '태백', sido: '강원', stationKeywords: ['황지동', '태백'] },
   // 충북
-  { name: '청주', sido: '충북', stationKeyword: '청주' },
-  { name: '충주', sido: '충북', stationKeyword: '충주' },
-  { name: '제천', sido: '충북', stationKeyword: '제천' },
+  { name: '청주', sido: '충북', stationKeywords: ['용암동', '복대동', '오송읍', '청주'] },
+  { name: '충주', sido: '충북', stationKeywords: ['칠금동', '충주'] },
+  { name: '제천', sido: '충북', stationKeywords: ['장락동', '제천'] },
   // 충남
-  { name: '천안', sido: '충남', stationKeyword: '천안' },
-  { name: '아산', sido: '충남', stationKeyword: '아산' },
-  { name: '공주', sido: '충남', stationKeyword: '공주' },
-  { name: '보령', sido: '충남', stationKeyword: '보령' },
-  { name: '서산', sido: '충남', stationKeyword: '서산' },
-  { name: '논산', sido: '충남', stationKeyword: '논산' },
-  { name: '당진', sido: '충남', stationKeyword: '당진' },
-  // 전북
-  { name: '전주', sido: '전북', stationKeyword: '전주' },
-  { name: '익산', sido: '전북', stationKeyword: '익산' },
-  { name: '군산', sido: '전북', stationKeyword: '군산' },
-  { name: '정읍', sido: '전북', stationKeyword: '정읍' },
-  { name: '남원', sido: '전북', stationKeyword: '남원' },
-  { name: '김제', sido: '전북', stationKeyword: '김제' },
+  { name: '천안', sido: '충남', stationKeywords: ['성정동', '쌍용동', '두정동', '천안'] },
+  { name: '아산', sido: '충남', stationKeywords: ['모종동', '온양동', '아산'] },
+  { name: '공주', sido: '충남', stationKeywords: ['금흥동', '공주'] },
+  { name: '보령', sido: '충남', stationKeywords: ['대천동', '보령'] },
+  { name: '서산', sido: '충남', stationKeywords: ['동문동', '대산읍', '서산'] },
+  { name: '논산', sido: '충남', stationKeywords: ['취암동', '논산'] },
+  { name: '당진', sido: '충남', stationKeywords: ['읍내동', '당진'] },
+  // 전북 — 김제 정밀 매핑 (확인된 실제 측정소: 요촌동/계화면/광활면)
+  { name: '전주', sido: '전북', stationKeywords: ['효자동', '서신동', '송천동', '팔복동', '여의동', '혁신동', '전주'] },
+  { name: '익산', sido: '전북', stationKeywords: ['모현동', '송학동', '익산'] },
+  { name: '군산', sido: '전북', stationKeywords: ['신풍동(군산)', '소룡동', '구암동', '군산'] },
+  { name: '정읍', sido: '전북', stationKeywords: ['연지동', '정읍'] },
+  { name: '남원', sido: '전북', stationKeywords: ['도통동', '남원'] },
+  { name: '김제', sido: '전북', stationKeywords: ['요촌동', '계화면', '광활면', '김제'] },
   // 전남
-  { name: '여수', sido: '전남', stationKeyword: '여수' },
-  { name: '순천', sido: '전남', stationKeyword: '순천' },
-  { name: '목포', sido: '전남', stationKeyword: '목포' },
-  { name: '광양', sido: '전남', stationKeyword: '광양' },
-  { name: '나주', sido: '전남', stationKeyword: '나주' },
+  { name: '여수', sido: '전남', stationKeywords: ['삼일동', '여천동', '여수'] },
+  { name: '순천', sido: '전남', stationKeywords: ['장천동', '연향동', '순천'] },
+  { name: '목포', sido: '전남', stationKeywords: ['용해동', '석현동', '목포'] },
+  { name: '광양', sido: '전남', stationKeywords: ['중동', '광양읍', '광양'] },
+  { name: '나주', sido: '전남', stationKeywords: ['빛가람동', '송월동', '나주'] },
   // 경북
-  { name: '포항', sido: '경북', stationKeyword: '포항' },
-  { name: '경주', sido: '경북', stationKeyword: '경주' },
-  { name: '안동', sido: '경북', stationKeyword: '안동' },
-  { name: '구미', sido: '경북', stationKeyword: '구미' },
-  { name: '김천', sido: '경북', stationKeyword: '김천' },
-  { name: '문경', sido: '경북', stationKeyword: '문경' },
-  { name: '상주', sido: '경북', stationKeyword: '상주' },
-  { name: '영주', sido: '경북', stationKeyword: '영주' },
-  { name: '영천', sido: '경북', stationKeyword: '영천' },
-  { name: '경산', sido: '경북', stationKeyword: '경산' },
+  { name: '포항', sido: '경북', stationKeywords: ['장량동', '대송면', '청림동', '포항'] },
+  { name: '경주', sido: '경북', stationKeywords: ['용강동', '성건동', '경주'] },
+  { name: '안동', sido: '경북', stationKeywords: ['옥동', '강남동', '안동'] },
+  { name: '구미', sido: '경북', stationKeywords: ['공단동', '상모사곡동', '구미'] },
+  { name: '김천', sido: '경북', stationKeywords: ['평화동', '김천'] },
+  { name: '문경', sido: '경북', stationKeywords: ['모전동', '점촌', '문경'] },
+  { name: '상주', sido: '경북', stationKeywords: ['남성동', '상주'] },
+  { name: '영주', sido: '경북', stationKeywords: ['휴천동', '영주'] },
+  { name: '영천', sido: '경북', stationKeywords: ['완산동', '영천'] },
+  { name: '경산', sido: '경북', stationKeywords: ['중방동', '경산'] },
   // 경남
-  { name: '창원', sido: '경남', stationKeyword: '창원' },
-  { name: '진주', sido: '경남', stationKeyword: '진주' },
-  { name: '통영', sido: '경남', stationKeyword: '통영' },
-  { name: '사천', sido: '경남', stationKeyword: '사천' },
-  { name: '김해', sido: '경남', stationKeyword: '김해' },
-  { name: '밀양', sido: '경남', stationKeyword: '밀양' },
-  { name: '거제', sido: '경남', stationKeyword: '거제' },
-  { name: '양산', sido: '경남', stationKeyword: '양산' },
+  { name: '창원', sido: '경남', stationKeywords: ['반송동', '명서동', '의창구', '창원'] },
+  { name: '진주', sido: '경남', stationKeywords: ['상대동', '평거동', '진주'] },
+  { name: '통영', sido: '경남', stationKeywords: ['무전동', '통영'] },
+  { name: '사천', sido: '경남', stationKeywords: ['벌용동', '사천'] },
+  { name: '김해', sido: '경남', stationKeywords: ['장유3동', '내외동', '김해'] },
+  { name: '밀양', sido: '경남', stationKeywords: ['내일동', '밀양'] },
+  { name: '거제', sido: '경남', stationKeywords: ['옥포동', '고현동', '거제'] },
+  { name: '양산', sido: '경남', stationKeywords: ['중앙동', '물금읍', '양산'] },
   // 제주
-  { name: '제주', sido: '제주', stationKeyword: '이도동' },
-  { name: '서귀포', sido: '제주', stationKeyword: '서귀포' },
+  { name: '제주', sido: '제주', stationKeywords: ['이도동', '연동', '노형동', '제주'] },
+  { name: '서귀포', sido: '제주', stationKeywords: ['동홍동', '대정읍', '서귀포'] },
 ]
 
 /** 주소 / 도시명으로 KOREAN_CITIES_WORKER 매칭. 못 찾으면 null. */
@@ -245,20 +247,27 @@ async function fetchAirQualityFromAirKorea(cityName: string, env: Env): Promise<
     const items = data.response?.body?.items
     if (!Array.isArray(items) || items.length === 0) return null
 
-    // 1) 측정소 키워드와 stationName 매칭
-    const matched = items.find((x) => x.stationName?.includes(city.stationKeyword))
     const parseNum = (v: string | undefined): number | null => {
       if (!v || v === '-' || v === '') return null
       const n = Number(v)
       return Number.isFinite(n) ? n : null
     }
-    if (matched) {
-      return {
-        pm10: parseNum(matched.pm10Value),
-        pm25: parseNum(matched.pm25Value),
-        station: matched.stationName ?? null,
-        dataTime: matched.dataTime ?? null,
-        source: 'airkorea',
+
+    // 1) stationKeywords 우선순위 매칭 — 앞에서부터 시도. 첫 매칭이 통신장애('-')이면 다음 키워드.
+    //    pm10/pm25 둘 다 null 인 측정소는 skip 하고 다음 후보로.
+    for (const kw of city.stationKeywords) {
+      const candidates = items.filter((x) => x.stationName?.includes(kw))
+      for (const m of candidates) {
+        const pm10 = parseNum(m.pm10Value)
+        const pm25 = parseNum(m.pm25Value)
+        if (pm10 !== null || pm25 !== null) {
+          return {
+            pm10, pm25,
+            station: m.stationName ?? null,
+            dataTime: m.dataTime ?? null,
+            source: 'airkorea',
+          }
+        }
       }
     }
     // 2) 매칭 측정소 없으면 시도 전체 평균
@@ -372,12 +381,14 @@ export default {
         const trimmed = cityName.trim()
         if (trimmed.length === 0 || trimmed.length > 20) return json({ error: 'invalid city' }, 400)
         if (!/^[가-힣]+$/.test(trimmed)) return json({ error: 'invalid city characters' }, 400)
-        const cacheKey = `air:v1:${trimmed}`
+        const cacheKey = `air:v2:${trimmed}`
         const cached = await env.CACHE.get(cacheKey, 'json')
         if (cached) return json(cached)
         const result = await fetchAirQualityFromAirKorea(trimmed, env)
         if (result) {
-          await env.CACHE.put(cacheKey, JSON.stringify(result), { expirationTtl: 10 * 60 })
+          // 60분 캐시 — 에어코리아 자체가 1시간 갱신 + 사용자 클라이언트가 30분마다 fetch 라
+          // 60분 캐시면 사용자 평균 2회 중 1회만 에어코리아 호출.
+          await env.CACHE.put(cacheKey, JSON.stringify(result), { expirationTtl: 60 * 60 })
           return json(result)
         }
         // 에어코리아 호출 실패 또는 키 없음 — 클라이언트가 Open-Meteo fallback 하도록 404.
